@@ -107,6 +107,9 @@ class AudioDenoisingDataset(Dataset):
 
         self.noisy_files = self._find_audio_files(noisy_dir)
         self.clean_files = self._find_audio_files(clean_dir)
+        self.clean_files = self.clean_files[:1000]
+        print(f'{len(self.noisy_files) = }')
+        print(f'{len(self.clean_files) = }')
         self.sr = sr
         self.n_fft = n_fft
         self.hop_length = hop_length
