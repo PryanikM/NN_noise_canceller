@@ -3,64 +3,10 @@ import librosa
 import numpy as np
 import matplotlib.pyplot as plt
 import random
-
+from time import time
+from torch.utils.data import random_split
 import torch
 from torch.utils.data import Dataset, DataLoader
-import torch.nn as nn
-
-
-def find_audio_files(directory):
-    audio_files = []
-    audio_extensions = {".mp3", ".wav", ".flac", ".aac", ".ogg"}
-
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            if any(file.endswith(ext) for ext in audio_extensions):
-                audio_files.append(os.path.join(root, file))
-
-    return audio_files
-
-
-def load_audio(files_path, sr=16000, target_length=3.0):
-    audios = []
-    for file_path in files_path:
-        audio, _ = librosa.load(file_path, sr=sr)
-        target_samples = int(target_length * sr)
-
-        # Обрезка или дополнение тишиной
-        if len(audio) > target_samples:
-            audio = audio[:target_samples]  # обрезаем до нужного количества сэмплов
-        elif len(audio) < target_samples:
-            padding = target_samples - len(audio)
-            audio = np.pad(audio, (0, padding), 'constant')  # добавляем тишину
-        audios.append(audio)
-
-    return audios
-
-
-def add_noise(clean_audios, noise_audios):
-    mix_audios = []
-    for clean_audio in clean_audios:
-        noise_factor = np.random.normal(0, 1, clean_audio.shape)
-        mix_audios.append(clean_audio + random.choice(noise_audios) * noise_factor)
-    return mix_audios
-
-
-def audio_to_spectrogram(audios, n_fft=1024, hop_length=512):
-    """Преобразует аудио в спектрограмму."""
-    spectrograms = []
-    for audio in audios:
-        stft_output = librosa.stft(audio, n_fft=n_fft, hop_length=hop_length)
-        stft_complex = np.stack((stft_output.real, stft_output.imag), axis=0)
-        spectrograms.append(torch.tensor(stft_complex).unsqueeze(0).float())
-    return spectrograms
-
-
-def spectrogram_to_audio(spectrograms, sr=16000, n_fft=512, hop_length=256):
-    audios = []
-    for spectrogram in spectrograms:
-        audios.append(librosa.istft(spectrogram))
-    return audios
 
 
 def draw_spectogram(spectrogram, sr=16000, hop_length=256):
@@ -72,35 +18,33 @@ def draw_spectogram(spectrogram, sr=16000, hop_length=256):
     plt.show()
 
 
-def visualize_results(*spectrum_with_names, sr=16000):
-
+def visualize_results(*spectrum_with_names, sr=16000, hop_length=512):
     num_spectrum = len(spectrum_with_names)
     plt.figure(figsize=(15, 10))
 
     for i, (spectrum_tensor, name) in enumerate(spectrum_with_names):
-
         real_part = spectrum_tensor[0].detach().cpu().numpy()
         imag_part = spectrum_tensor[1].detach().cpu().numpy()
         amplitude = np.sqrt(real_part ** 2 + imag_part ** 2)  # Амплитуда = sqrt(real^2 + imag^2)
         amplitude_log = np.log1p(amplitude)  # log(1 + amplitude) для предотвращения log(0)
         amplitude_log_normalized = amplitude_log / np.max(amplitude_log)
         plt.subplot(num_spectrum, 1, i + 1)
-        plt.imshow(amplitude_log_normalized, aspect='auto', origin='lower', cmap='viridis')
+        librosa.display.specshow(amplitude_log_normalized, sr=sr, hop_length=hop_length, y_axis='log', x_axis='time')
         plt.title(name)
         plt.colorbar(label='Amplitude')
         plt.xlabel('Time (frames)')
         plt.ylabel('Frequency (bins)')
 
-
-
     plt.tight_layout()
     plt.show()
 
+
 def inverse_stft_transform(stft, hop_length=512):
-        stft_numpy = stft.cpu().squeeze(0).numpy()
-        stft_complex = stft_numpy[0] + 1j * stft_numpy[1]
-        clean_signal = librosa.istft(stft_complex, hop_length=hop_length)
-        return clean_signal
+    stft_numpy = stft.cpu().squeeze(0).numpy()
+    stft_complex = stft_numpy[0] + 1j * stft_numpy[1]
+    clean_signal = librosa.istft(stft_complex, hop_length=hop_length)
+    return clean_signal
+
 
 class AudioDenoisingDataset(Dataset):
     def __init__(self, noisy_dir, clean_dir, sr=16000, n_fft=1024, hop_length=512, target_length=3.):
@@ -176,7 +120,6 @@ class AudioDenoisingDataset(Dataset):
         noisy_tensor = self._stft_transform(noisy)
         clean_tensor = self._stft_transform(clean)
 
-
         return noisy_tensor, clean_tensor
 
     def _find_audio_files(self, directory):
@@ -202,7 +145,6 @@ class AudioDenoisingDataset(Dataset):
             audio = np.pad(audio, (0, padding), 'constant')
         return audio
 
-
     def add_noise(self, clean_audio, noise_audio, min_noise_level=0.1, max_noise_level=0.8):
         target_noise_level = random.uniform(min_noise_level, max_noise_level)
 
@@ -216,27 +158,97 @@ class AudioDenoisingDataset(Dataset):
         return mixed_sound
 
 
-class DenoisingNet(nn.Module):
-    def __init__(self):
-        super(DenoisingNet, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=(3, 3), padding=1),
-            nn.ReLU()
+class NeuralNetwork:
+    def __init__(self, noisy_dir, clean_dir, sr, n_fft, hop_length, target_length, train_frac, batch_size, neural_net):
+        self.sr = sr
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.target_length = target_length
+        self.dataset = AudioDenoisingDataset(
+            noisy_dir=noisy_dir,
+            clean_dir=clean_dir,
+            sr=sr,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            target_length=target_length,
         )
+        self.train_size = int(train_frac * len(self.dataset))
+        self.val_size = len(self.dataset) - self.train_size
+        self.train_dataset, self.val_dataset = random_split(self.dataset, [self.train_size, self.val_size])
+        self.batch_size = batch_size
 
-        self.decoder = nn.Sequential(
-            nn.Conv2d(64, 32, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 16, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 2, kernel_size=(3, 3), padding=1)
-        )
+        self.train_dataloader = DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True)
+        self.val_dataloader = DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("Using device:", self.device)
+        self.model = neural_net().to(self.device)
 
-    def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+    def get_model(self):
+        return self.model
+
+    def set_model(self, neural_net):
+        self.model = neural_net().to(self.device)
+
+    def study(self, epochs, loss_fn, optimizer, validation_repeate=0, save_best_model=False, model_path=None):
+        if (validation_repeate != 0):
+            validation_repeate = validation_repeate
+            print_validation = list(range(1, epochs, int(1. / validation_repeate)))
+        else:
+            print_validation = [0]
+
+        best_val_loss = float('inf')
+        for epoch in range(1, epochs + 1):
+            self.model.train()  # Устанавливаем модель в режим обучения
+            total_loss = 0
+            train_start = time()
+            for noisy, clean in self.train_dataloader:
+                noisy, clean = noisy.to(self.device), clean.to(self.device)
+
+                # Прямой проход
+                output = self.model(noisy)
+
+                # Вычисление функции потерь
+                loss = loss_fn(output, clean)
+
+                # Обратное распространение и оптимизация
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+
+            avg_train_loss = total_loss / len(self.train_dataloader)
+
+            if epoch not in print_validation and epoch != epochs:
+                train_end = time()
+                print(f"Epoch {epoch}/{epochs}, Time = {train_end - train_start}, Train Loss: {avg_train_loss:.4f}")
+            else:
+                # Валидация
+                self.model.eval()  # Устанавливаем модель в режим оценки
+                total_val_loss = 0
+                with torch.no_grad():
+                    for noisy, clean in self.val_dataloader:
+                        noisy, clean = noisy.to(self.device), clean.to(self.device)
+                        output = self.model(noisy)
+                        loss = loss_fn(output, clean)
+                        total_val_loss += loss.item()
+                train_end = time()
+                avg_val_loss = total_val_loss / len(self.val_dataloader)
+                print(
+                    f"Epoch {epoch}/{epochs}, Time = {train_end - train_start} Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
+
+                if save_best_model and avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    if model_path is not None:
+                        torch.save(self.model.state_dict(), model_path)
+                    print(f"Best model saved with Validation Loss: {best_val_loss:.4f}")
+    def get_example(self):
+        return self.dataset.get_example()
+
+    def get_result_from_model(self, noisy_tensor):
+        self.model.eval()
+        noisy_tensor = noisy_tensor.to(self.device)
+        with torch.no_grad():
+            predicted_clean_stft = self.model(noisy_tensor)
+        clean_signal = inverse_stft_transform(predicted_clean_stft)
+        return predicted_clean_stft, clean_signal
