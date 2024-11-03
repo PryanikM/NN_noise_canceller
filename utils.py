@@ -15,7 +15,7 @@ class AudioDenoisingDataset(Dataset):
         if noisy_dir is not None and clean_dir is not None:
             self.noisy_files = self._find_audio_files(noisy_dir)
             self.clean_files = self._find_audio_files(clean_dir)
-            # self.clean_files = self.clean_files[:2000]
+            # self.clean_files = self.clean_files[:20]
 
             print(f'{len(self.clean_files) = }')
             print(f'{len(self.noisy_files) = }')
@@ -161,6 +161,8 @@ class NeuralNetwork:
             clean_dir=clean_dir
         )
         if noisy_dir is not None and clean_dir is not None:
+            self.train_size = int(hp.train_frac * len(self.dataset))
+            self.val_size = len(self.dataset) - self.train_size
             self.train_dataset, self.val_dataset = random_split(self.dataset, [self.train_size, self.val_size])
             self.train_dataloader = DataLoader(self.train_dataset, batch_size=hp.batch_size, shuffle=True)
             self.val_dataloader = DataLoader(self.val_dataset, batch_size=hp.batch_size, shuffle=False)
@@ -173,8 +175,6 @@ class NeuralNetwork:
         print("Using device:", self.device)
         self.model = neural_net.to(self.device)
 
-        self.train_size = int(hp.train_frac * len(self.dataset))
-        self.val_size = len(self.dataset) - self.train_size
         self.batch_size = hp.batch_size
         self.optimizer = optimizer(self.model.parameters(), lr=hp.lr)
         self.loss_fn = loss_fn
@@ -196,7 +196,7 @@ class NeuralNetwork:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.start_epoch = checkpoint['epoch'] + 1  # Начинаем с следующей эпохи
-        self.loss_fn = checkpoint['loss']
+        # self.loss_fn = checkpoint['loss']
 
     def study(self, epochs, validation_repeate=0, save_best_model=False, model_path=None):
         if (validation_repeate != 0):
